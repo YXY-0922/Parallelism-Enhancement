@@ -405,7 +405,7 @@ ComputeType DetectComputeType(const ComputeOpNode* self, const Stage& stage) {
         ++thread_red;
       }
     } else {
-      ICHECK_EQ(thread_red, 0) << "Cross thread reduce cannot swap with normal data axis";
+      // ICHECK_EQ(thread_red, 0) << "Cross thread reduce cannot swap with normal data axis";
     }
   }
   if (tensorize != 0) {

@@ -46,18 +46,13 @@
 # - ON: enable CUDA with cmake's auto search
 # - OFF: disable CUDA
 # - /path/to/cuda: use specific path to cuda toolkit
-set(USE_CUDA OFF)
+set(USE_CUDA ON)
 
 # Whether to enable NCCL support:
 # - ON: enable NCCL with cmake's auto search
 # - OFF: disable NCCL
 # - /path/to/nccl: use specific path to nccl
 set(USE_NCCL OFF)
-
-# Whether to enable NVTX support (must have USE_CUDA enabled):
-# - ON: enable NCCL with cmake's auto search
-# - OFF: disable NCCL
-set(USE_NVTX OFF)
 
 # Whether enable ROCM runtime
 #
@@ -159,7 +154,7 @@ set(USE_MICRO_STANDALONE_RUNTIME OFF)
 # - OFF: disable llvm, note this will disable CPU codegen
 #        which is needed for most cases
 # - /path/to/llvm-config: enable specific LLVM when multiple llvm-dev is available.
-set(USE_LLVM OFF)
+set(USE_LLVM /workspace/S/yuxiyue/clang+llvm-14.0.0-x86_64-linux-gnu-ubuntu-18.04/bin/llvm-config)
 
 # Whether use MLIR to help analyze, requires USE_LLVM is enabled
 # Possible values: ON/OFF
@@ -301,9 +296,6 @@ set(USE_VITIS_AI OFF)
 
 # Build Verilator codegen and runtime
 set(USE_VERILATOR OFF)
-
-# Whether to use the Multi-System Compiler
-set(USE_MSC OFF)
 
 #Whether to use CLML codegen
 set(USE_CLML OFF)

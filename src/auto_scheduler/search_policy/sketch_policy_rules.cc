@@ -461,6 +461,68 @@ std::vector<std::pair<State, int>> RuleSpecialComputeLocationGPU::Apply(
   return {std::make_pair(std::move(tmp_s), stage_id - 1)};
 }
 
+/********** RuleFuseReductionGPU **********/
+
+SketchGenerationRule::ConditionKind RuleFuseReductionGPU::MeetCondition(
+    const SketchPolicyNode& policy, const State& state, int stage_id) const {
+  const std::set<int>& consumers = GetConsumers(policy.search_task, state, stage_id);
+  
+  if (consumers.size() != 1) {
+    return ConditionKind::kSkip;
+  }
+
+  int iter_size = state->stages[*consumers.begin()]->iters.size();
+
+  if (iter_size == 0 || state->stages[stage_id]->iters.size() == 0 || state->stages[stage_id]->iters.size() <= iter_size){
+    return ConditionKind::kSkip;
+  }
+
+  for (size_t i = 0; i < iter_size - 1; ++i) {
+    if((state->stages[*consumers.begin()]->iters[i]->range->min != state->stages[stage_id]->iters[i]->range->min).as<tvm::tir::IntImmNode>()->value||
+      (state->stages[*consumers.begin()]->iters[i]->range->extent != state->stages[stage_id]->iters[i]->range->extent).as<tvm::tir::IntImmNode>()->value||
+      (state->stages[*consumers.begin()]->iters[i]->iter_kind != state->stages[stage_id]->iters[i]->iter_kind))
+      return ConditionKind::kSkip;
+  }
+  if((state->stages[*consumers.begin()]->iters[iter_size-1]->range->min != state->stages[stage_id]->iters[iter_size-1]->range->min).as<tvm::tir::IntImmNode>()->value||
+    (state->stages[*consumers.begin()]->iters[iter_size-1]->range->extent != state->stages[stage_id]->iters[iter_size-1]->range->extent).as<tvm::tir::IntImmNode>()->value||
+    (state->stages[stage_id]->iters[iter_size-1]->iter_kind != IteratorKind::kSpatial)||
+    (state->stages[*consumers.begin()]->iters[iter_size-1]->iter_kind != IteratorKind::kReduction))
+    return ConditionKind::kSkip;
+  return ConditionKind::kApplyAndSkipRest;
+}
+
+std::vector<std::pair<State, int>> RuleFuseReductionGPU::Apply(
+    const SketchPolicyNode& policy, const State& state, int stage_id) const {
+  State tmp_s = state;
+  const std::set<int>& consumers = GetConsumers(policy.search_task, state, stage_id);
+  ICHECK_EQ(consumers.size(), 1);
+
+  int target_stage_id = *consumers.begin();
+
+  std::string multi_level_tiling_structure = GetStringParam(policy.params, SketchParamKey::MultiLevelTiling::gpu_structure);
+  multi_level_tiling_structure.insert(3, 1, 'K');
+  std::vector<int> spatial_split_step_ids;
+  State base_state =
+      DoReductionMultiLevelTiling(state, stage_id, multi_level_tiling_structure, &spatial_split_step_ids);
+
+  std::vector<std::pair<State, int>> ret;
+  std::vector<int> follow_tiling_levels =
+      IsGPUTask(policy.search_task) ? std::vector<int>{3} : std::vector<int>{1, 2};
+  for (int level : follow_tiling_levels) {
+    if (tolower(multi_level_tiling_structure[level - 1]) != 's') {
+      continue;
+    }
+    State tmp_s = base_state;
+    tmp_s = ReductionTiling(tmp_s, target_stage_id, spatial_split_step_ids, level);
+    const Iterator& target_iter =
+        tmp_s->stages[target_stage_id]->iters[level * spatial_split_step_ids.size()];
+    tmp_s.compute_at(stage_id, target_stage_id, target_iter);
+    ret.emplace_back(std::move(tmp_s), stage_id - 1);
+  }
+
+  return ret;
+}
+
 /********** RuleCustomSketch **********/
 
 SketchGenerationRule::ConditionKind RuleCustomSketch::MeetCondition(const SketchPolicyNode& policy,
@@ -886,6 +948,7 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         return ResultKind::kInvalid;
       }
       state->bind(stage_id, threadidx_it, IteratorAnnotation::kThreadX);
+      state->bind(stage_id, (*state)->stages[stage_id]->iters[3], IteratorAnnotation::kThreadY);
     } else if (stage->compute_at == ComputeAtKind::kIter &&
                StrEndsWith(stage->op->name, ".shared")) {
       // Do cooperative fetching for the cache read stage.

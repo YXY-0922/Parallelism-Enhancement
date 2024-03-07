@@ -1179,19 +1179,21 @@ void FollowFusedSplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
 Optional<Integer> FollowFusedSplitStepNode::ExtractSplitLength(
     const Array<Step>& transform_steps) const {
   PrimExpr ret(1);
-
+  std::cout << "pslengths: ";
   for (auto src_step_id : src_step_ids) {
     // Make sure the src_step_id is within the range of transform_steps.
     ICHECK_LT(src_step_id.IntValue(), transform_steps.size());
     auto ps = transform_steps[src_step_id.IntValue()].as<SplitStepNode>();
     ICHECK(ps != nullptr);
     // Multiple the splitting factor on corresponding splitting level of src_steps.
+    std::cout << ps->lengths.size() << " ";
     if (ps->lengths[level] && ret.defined()) {
       ret *= ps->lengths[level].value();
     } else {
       return NullOpt;
     }
   }
+  std::cout << std::endl;
   return Downcast<Integer>(ret);
 }
 

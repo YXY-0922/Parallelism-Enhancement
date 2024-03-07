@@ -705,6 +705,13 @@ State DoMultiLevelTiling(const State& state, int stage_id, const std::string& fo
 State FollowTiling(const State& state, int stage_id, const std::vector<int>& split_step_ids,
                    int n_split);
 
+State DoReductionMultiLevelTiling(const State& state, int stage_id, const std::string& format,
+                         std::vector<int>* spatial_split_step_ids = nullptr);
+
+// Apply tiling structure: space, space, space, ..., with tile sizes from other SplitStep and ReductionSplit
+State ReductionTiling(const State& state, int stage_id, const std::vector<int>& split_step_ids,
+                   int n_split);
+
 // Prune invalid states and return the results in-place.
 void PruneInvalidState(const SearchTask& task, Array<State>* states);
 

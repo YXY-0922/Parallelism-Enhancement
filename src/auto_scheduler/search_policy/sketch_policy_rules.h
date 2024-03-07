@@ -131,6 +131,9 @@ DEFINE_SKETCH_GENERATION_RULE(RuleCrossThreadReduction);
  * location of the producers of compute ops that perform "fake reduction" with const tensors. */
 DEFINE_SKETCH_GENERATION_RULE(RuleSpecialComputeLocationGPU);
 
+/*! \brief Handle the reduction stage after the reduction split stage. */
+DEFINE_SKETCH_GENERATION_RULE(RuleFuseReductionGPU);
+
 /*! \brief The rule that allows users to generate custom sketches. */
 class RuleCustomSketch : public SketchGenerationRule {
  public:
