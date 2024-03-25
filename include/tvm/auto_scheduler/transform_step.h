@@ -651,6 +651,78 @@ class FollowSplitStep : public Step {
   TVM_DEFINE_OBJECT_REF_METHODS(FollowSplitStep, Step, FollowSplitStepNode);
 };
 
+class FollowSplitWithoutVthreadStepNode : public StepNode {
+ public:
+  /*! \brief The id of the iter to be split. */
+  int iter_id;
+  /*! \brief The index of the split step to be followed in the history. */
+  int src_step_id;
+  /*! \brief The number of split level. */
+  int n_split;
+
+  void WriteToRecord(dmlc::JSONWriter* writer) const final;
+
+  /*!
+   * \brief Extract split lengths.
+   * \param transform_steps An array of history transform steps.
+   * \return The multiple split factors.
+   */
+  Array<Optional<Integer>> ExtractSplitLengths(const Array<Step>& transform_steps) const;
+
+  /*!
+   * \brief Apply the current step to State.
+   * \param state A mutable pointer to state, which will be updated.
+   * \return The iterator results after split.
+   */
+  Array<Iterator> ApplyToState(State* state) const;
+
+  /*!
+   * \brief Apply the current step to tvm.schedule.
+   * \param stages The list of current stages
+   * \param stage_to_axes A map that maps stage ot all its iterators.
+   * \param transform_steps An array of history transform steps.
+   * \return The iterator results after split.
+   */
+  Array<tir::IterVar> ApplyToSchedule(Array<te::Stage>* stages, StageToAxesMap* stage_to_axes,
+                                      const Array<Step>& transform_steps) const;
+
+  /*!
+   * \brief Print the current step as equivalent python schedule API.
+   * \param stages The list of current stages
+   * \param stage_to_axes A map that maps stage ot all its iterators.
+   * \param transform_steps An array of history transform steps.
+   * \return Python schedule code.
+   */
+  String PrintAsPythonAPI(Array<te::Stage>* stages, StageToAxesMap* stage_to_axes,
+                          const Array<Step>& transform_steps) const;
+
+  static constexpr const char* record_prefix_str = "FSPWV";
+
+  static constexpr const char* _type_key = "auto_scheduler.FollowSplitWithoutVthreadStep";
+  TVM_DECLARE_FINAL_OBJECT_INFO(FollowSplitWithoutVthreadStepNode, StepNode);
+};
+
+class FollowSplitWithoutVthreadStep : public Step {
+ public:
+  /*!
+   * \brief The constructor.
+   * \param stage_id The index of the stage to be split.
+   * \param iter_id The index of the iterator to be split.
+   * \param src_step_id The index of the split step to be followed in the history.
+   * \param n_split The number of split level.
+   */
+  FollowSplitWithoutVthreadStep(int stage_id, int iter_id, int src_step_id, int n_split);
+
+  /*!
+   * \brief The constructor used to read a step record from JSONReader and create the
+   * corresponding step.
+   * \param reader The input JSONReader.
+   */
+  explicit FollowSplitWithoutVthreadStep(dmlc::JSONReader* reader);
+
+  TVM_DEFINE_OBJECT_REF_METHODS(FollowSplitWithoutVthreadStep, Step, FollowSplitWithoutVthreadStepNode);
+};
+
 /*! \brief Similar to FollowSplitStep, but uses split factors from multiple steps.
  *  \note This can be used for the split in cooperative fetching.
  */

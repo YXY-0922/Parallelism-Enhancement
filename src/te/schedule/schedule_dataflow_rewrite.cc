@@ -283,6 +283,11 @@ Array<Tensor> ReplaceOriginalOp(Schedule sch, Stage orig_stage, const std::strin
   return cache_tensor_list;
 }
 
+inline bool StrEndsWith(const String& a, const String& b) {
+  if (b.size() > a.size()) return false;
+  return std::equal(a.c_str() + a.size() - b.size(), a.c_str() + a.size(), b.c_str());
+}
+
 // Cache write and relayout the data according to loop pattern
 Array<Tensor> CacheWriteWithReLayout(Schedule sch, const Array<Tensor>& tensor_array,
                                      const std::string& scope) {
@@ -295,6 +300,22 @@ Array<Tensor> CacheWriteWithReLayout(Schedule sch, const Array<Tensor>& tensor_a
   std::unordered_set<IterVar> red_axis;
   Array<IterVar> new_axis;
   std::unordered_map<IterVar, Range> dom_map;
+  Map<String, ObjectRef> new_attrs;
+
+  for(const auto& attr : compute->attrs){
+    Array<String> tmp_iters;
+    const auto& iter_names = attr.second.as<ArrayNode>();
+    for(int i = 0; i < iter_names->size(); ++i){
+      std::string iter_name = iter_names->at(i).as<StringObj>()->data;
+      // if(!StrEndsWith(iter_name, "_c")){
+      //   iter_name = iter_name + "_c";
+      // }
+      iter_name = iter_name + "_c";
+      String tmp_name = iter_name;
+      tmp_iters.push_back(tmp_name);
+    }
+    new_attrs.Set(attr.first, tmp_iters);
+  }
 
   std::unordered_map<const VarNode*, PrimExpr> vsub;
   std::unordered_map<const VarNode*, PrimExpr> vsub2newvar;
@@ -302,6 +323,11 @@ Array<Tensor> CacheWriteWithReLayout(Schedule sch, const Array<Tensor>& tensor_a
 
   PrepareAxisMapping(orig_stage, compute, &red_axis, &new_axis, &dom_map, &vsub, &vsub2newvar,
                      &predicates);
+
+  // std::cout << "axis name" << std::endl;
+  // for(int i = 0; i < new_axis.size(); ++i){
+  //   std::cout << new_axis[i]->var->name_hint << std::endl;
+  // }
 
   PrimExpr body;
   Array<PrimExpr> body_list;
@@ -341,7 +367,7 @@ Array<Tensor> CacheWriteWithReLayout(Schedule sch, const Array<Tensor>& tensor_a
     }
   }
   Operation cache_op =
-      ComputeOp(compute->name + "." + scope, compute->tag, compute->attrs, new_axis, body_list);
+      ComputeOp(compute->name + "." + scope, compute->tag, new_attrs, new_axis, body_list);
 
   Array<PrimExpr> cache_expr_list;
   for (size_t i = 0; i < tensor_size; i++) {

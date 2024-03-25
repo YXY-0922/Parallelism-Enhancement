@@ -123,6 +123,12 @@ struct SearchPolicyKey {
       "auto_scheduler_simplify_const_tensor_indices";
 };
 
+/*! \brief Attribute keys of ops used for FuseReduction. */
+struct FuseReductionIterKey {
+  static constexpr const char* block_level_split = "auto_scheduler_block_level_split";
+  static constexpr const char* thread_level_split = "auto_scheduler_thread_level_split";
+};
+
 /*!
  * \brief The base class of search policies.
  */

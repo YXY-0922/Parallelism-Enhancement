@@ -365,6 +365,14 @@ State DoReductionMultiLevelTiling(const State& state, int stage_id, const std::s
       stage->op->attrs.count(SearchPolicyKey::no_split_at_inner)
           ? GetIterNameSetParam(stage->op->attrs, SearchPolicyKey::no_split_at_inner)
           : std::set<std::string>();
+  const std::set<std::string>& block_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::block_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::block_level_split)
+          : std::set<std::string>();
+  const std::set<std::string>& thread_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::thread_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::thread_level_split)
+          : std::set<std::string>();
 
   auto sr_levels = [&](int size, const Iterator& iter, std::vector<std::vector<Iterator>>& levels) {
     ICHECK_GE(size, 1);
@@ -385,7 +393,9 @@ State DoReductionMultiLevelTiling(const State& state, int stage_id, const std::s
   for (int i = 0; i < state->stages[stage_id]->iters.size(); ++i) {
     if (!no_split_at_inner_name_set.count(state->stages[stage_id]->iters[i]->name)) {
       if (state->stages[stage_id]->iters[i]->iter_kind == IteratorKind::kSpatial) {
-        if (i == state->stages[stage_id]->iters.size() - 2){
+        if (block_level_split_name_set.count(state->stages[stage_id]->iters[i]->name)){
+          space_levels[0].push_back(state->stages[stage_id]->iters[i]);
+        } else if (thread_level_split_name_set.count(state->stages[stage_id]->iters[i]->name)) {
           sr_levels(1, state->stages[stage_id]->iters[i], ksplit_levels);
         } else {
           sr_levels(n_space, state->stages[stage_id]->iters[i], space_levels);
@@ -445,7 +455,7 @@ State DoReductionMultiLevelTiling(const State& state, int stage_id, const std::s
   return tmp_s;
 }
 
-State ReductionTiling(const State& state, int stage_id, const std::vector<int>& split_step_ids,
+State SecondTiling(const State& state, int stage_id, const std::vector<int>& split_step_ids,
                    int n_split) {
   if (n_split < 1 || n_split > 3) {
     LOG(FATAL) << "Invalid split parts, currently only support 1, 2 and 3";
@@ -461,12 +471,23 @@ State ReductionTiling(const State& state, int stage_id, const std::vector<int>& 
       stage->op->attrs.count(SearchPolicyKey::no_split_at_inner)
           ? GetIterNameSetParam(stage->op->attrs, SearchPolicyKey::no_split_at_inner)
           : std::set<std::string>();
-  int no_split_at_inner_name_in_stage_cnt = 0;
+  const std::set<std::string>& block_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::block_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::block_level_split)
+          : std::set<std::string>();
+  const std::set<std::string>& thread_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::thread_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::thread_level_split)
+          : std::set<std::string>();
+
+  int no_split_name_in_stage_cnt = 0;
   for (const auto& iter : state->stages[stage_id]->iters) {
-    no_split_at_inner_name_in_stage_cnt += no_split_at_inner_name_set.count(iter->name);
+    no_split_name_in_stage_cnt += no_split_at_inner_name_set.count(iter->name);
+    no_split_name_in_stage_cnt += block_level_split_name_set.count(iter->name);
+    no_split_name_in_stage_cnt += thread_level_split_name_set.count(iter->name);
   }
 
-  ICHECK_EQ(state->stages[stage_id]->iters.size() - no_split_at_inner_name_in_stage_cnt - 1,
+  ICHECK_EQ(state->stages[stage_id]->iters.size() - no_split_name_in_stage_cnt,
             split_step_ids.size());
 
   State tmp_s = state;
@@ -474,7 +495,9 @@ State ReductionTiling(const State& state, int stage_id, const std::vector<int>& 
   for (const auto& iter : state->stages[stage_id]->iters) {
     if (iter->iter_kind == IteratorKind::kSpatial) {
       // For spatial iterator, split it into multi iterators
-      if (!no_split_at_inner_name_set.count(iter->name)) {
+      if (thread_level_split_name_set.count(iter->name)){
+        reduce_0.push_back(iter);
+      } else if (!no_split_at_inner_name_set.count(iter->name) && !block_level_split_name_set.count(iter->name)) {
         IteratorAnnotation ann_type = iter->annotation;
         split_res = tmp_s.follow_split(stage_id, iter, split_step_ids[ct], n_split);
         // Restore annotation. Move unroll and vectorize to inner, move parallel
@@ -512,6 +535,111 @@ State ReductionTiling(const State& state, int stage_id, const std::vector<int>& 
             ICHECK_EQ(n_split, 3);
             space_3.push_back(iter);
           }
+        } else if (block_level_split_name_set.count(iter->name)) {
+          space_0.push_back(iter);
+        }
+      }
+    } else {
+      if (iter->iter_kind == IteratorKind::kReduction){
+        reduce_0.push_back(iter);
+      } else{
+        LOG(FATAL) << "Invalid iter type: " << int(iter->iter_kind);
+      }
+    }
+  }
+
+  if (n_split == 3) {
+    ConcatenateMove(&tmp_order, &space_0, &space_1, &space_2, &reduce_0, &space_3);
+  } else if (n_split == 2) {
+    ConcatenateMove(&tmp_order, &space_0, &space_1, &reduce_0, &space_2);
+  } else {
+    ConcatenateMove(&tmp_order, &space_0, &space_1);
+  }
+
+  tmp_s.reorder(stage_id, tmp_order);
+  return tmp_s;
+}
+
+State ReductionTiling(const State& state, int stage_id, const std::vector<int>& split_step_ids,
+                   int n_split) {
+  if (n_split < 1 || n_split > 3) {
+    LOG(FATAL) << "Invalid split parts, currently only support 1, 2 and 3";
+  }
+  // Apply up to three-level tiling structure:  space_L0, space_L1, space_L2, reduce_L1, reduce_L2
+  std::vector<Iterator> space_0, space_1, space_2, space_3, reduce_0, tmp_order;
+  Array<Iterator> split_res;
+
+  auto pop = state->stages[stage_id]->op.as<te::ComputeOpNode>();
+  ICHECK(pop != nullptr);
+  const Stage& stage = state->stages[stage_id];
+  const std::set<std::string>& no_split_at_inner_name_set =
+      stage->op->attrs.count(SearchPolicyKey::no_split_at_inner)
+          ? GetIterNameSetParam(stage->op->attrs, SearchPolicyKey::no_split_at_inner)
+          : std::set<std::string>();
+  const std::set<std::string>& block_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::block_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::block_level_split)
+          : std::set<std::string>();
+  const std::set<std::string>& thread_level_split_name_set =
+      stage->op->attrs.count(FuseReductionIterKey::thread_level_split)
+          ? GetIterNameSetParam(stage->op->attrs, FuseReductionIterKey::thread_level_split)
+          : std::set<std::string>();
+
+  int no_split_name_in_stage_cnt = 0;
+  for (const auto& iter : state->stages[stage_id]->iters) {
+    no_split_name_in_stage_cnt += no_split_at_inner_name_set.count(iter->name);
+    no_split_name_in_stage_cnt += block_level_split_name_set.count(iter->name);
+    no_split_name_in_stage_cnt += thread_level_split_name_set.count(iter->name);
+  }
+
+  ICHECK_EQ(state->stages[stage_id]->iters.size() - no_split_name_in_stage_cnt - 1,
+            split_step_ids.size());
+
+  State tmp_s = state;
+  int ct = 0;
+  for (const auto& iter : state->stages[stage_id]->iters) {
+    if (iter->iter_kind == IteratorKind::kSpatial) {
+      // For spatial iterator, split it into multi iterators
+      if (!no_split_at_inner_name_set.count(iter->name) && !block_level_split_name_set.count(iter->name)) {
+        IteratorAnnotation ann_type = iter->annotation;
+        split_res = tmp_s.follow_split_without_vthread(stage_id, iter, split_step_ids[ct], n_split);
+        // Restore annotation. Move unroll and vectorize to inner, move parallel
+        // to outer
+        switch (ann_type) {
+          case IteratorAnnotation::kUnroll:
+            split_res.Set(n_split, tmp_s.unroll(stage_id, split_res[n_split]));
+            break;
+          case IteratorAnnotation::kVectorize:
+            split_res.Set(n_split, tmp_s.vectorize(stage_id, split_res[n_split]));
+            break;
+          case IteratorAnnotation::kParallel:
+            split_res.Set(0, tmp_s.parallel(stage_id, split_res[0]));
+            break;
+          default:
+            break;
+        }
+
+        space_0.push_back(split_res[0]);
+        space_1.push_back(split_res[1]);
+        if (n_split >= 2) {
+          space_2.push_back(split_res[2]);
+          if (n_split == 3) {
+            space_3.push_back(split_res[3]);
+          }
+        }
+        ct++;
+      } else {
+        if (no_split_at_inner_name_set.count(iter->name)) {
+          if (n_split == 1) {
+            space_1.push_back(iter);
+          } else if (n_split == 2) {
+            space_2.push_back(iter);
+          } else {
+            ICHECK_EQ(n_split, 3);
+            space_3.push_back(iter);
+          }
+        } else if (block_level_split_name_set.count(iter->name)) {
+          space_0.push_back(iter);
         }
       }
     } else {

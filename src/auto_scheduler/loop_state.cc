@@ -293,6 +293,15 @@ Array<Iterator> State::follow_split(int stage_id, const Iterator& it, int src_st
   return step->ApplyToState(this);
 }
 
+Array<Iterator> State::follow_split_without_vthread(int stage_id, const Iterator& it, int src_step_id,
+                                    int n_split) {
+  const Stage& stage = operator->()->stages[stage_id];
+  FollowSplitWithoutVthreadStep step =
+      FollowSplitWithoutVthreadStep(stage_id, GetIndex(stage->iters, it), src_step_id, n_split);
+  CopyOnWrite()->transform_steps.push_back(step);
+  return step->ApplyToState(this);
+}
+
 Array<Iterator> State::follow_fused_split(int stage_id, const Iterator& it,
                                           const Array<Integer>& src_step_ids, int level,
                                           bool factor_or_nparts) {
@@ -510,6 +519,13 @@ TVM_REGISTER_GLOBAL("auto_scheduler.StateFollowSplit")
     .set_body_typed([](State state, int stage_id, const Iterator& it, int src_step_id,
                        int n_split) {
       const auto& res = state.follow_split(stage_id, it, src_step_id, n_split);
+      return Array<ObjectRef>{state, Array<Iterator>(res)};
+    });
+
+TVM_REGISTER_GLOBAL("auto_scheduler.StateFollowSplitWithoutVthread")
+    .set_body_typed([](State state, int stage_id, const Iterator& it, int src_step_id,
+                       int n_split) {
+      const auto& res = state.follow_split_without_vthread(stage_id, it, src_step_id, n_split);
       return Array<ObjectRef>{state, Array<Iterator>(res)};
     });
 

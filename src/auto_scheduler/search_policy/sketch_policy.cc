@@ -132,8 +132,8 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
       node->sketch_rules.push_back(&rule_always_inline);
       node->sketch_rules.push_back(&rule_simplify_compute_with_const_tensor);
       node->sketch_rules.push_back(&rule_cross_thread_reduction);
-      node->sketch_rules.push_back(&rule_fuse_reduction_gpu);
       node->sketch_rules.push_back(&rule_add_cache_write_stage);
+      node->sketch_rules.push_back(&rule_fuse_reduction_gpu);
       node->sketch_rules.push_back(&rule_multi_level_tiling_with_fusion);
       node->sketch_rules.push_back(&rule_multi_level_tiling);
       node->sketch_rules.push_back(&rule_skip_stage);

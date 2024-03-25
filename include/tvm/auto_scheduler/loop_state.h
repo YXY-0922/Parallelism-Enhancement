@@ -362,6 +362,9 @@ class State : public ObjectRef {
    */
   TVM_DLL Array<Iterator> follow_split(int stage_id, const Iterator& it, int src_step_id,
                                        int n_split);
+
+  TVM_DLL Array<Iterator> follow_split_without_vthread(int stage_id, const Iterator& it, int src_step_id,
+                                       int n_split);
   /*!
    * \brief The schedule primitive similar to split, but uses split factors from
    * fused previous steps.

@@ -218,6 +218,12 @@ SketchGenerationRule::ConditionKind RuleAddCacheWrite::MeetCondition(const Sketc
   if (NeedsMultilevelTiling(policy.search_task, state, stage_id) &&
       !HasSingleElementwiseMatchedConsumer(policy.search_task, state, stage_id)) {
     // An apply and skip rule will be handled in RuleMultiLevelTilingWithFusion
+    if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::block_level_split)){
+      if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::thread_level_split))
+        return ConditionKind::kApplyAndSkipRest;
+      else 
+        return ConditionKind::kSkip;
+    }
     return IsGPUTask(policy.search_task) ? ConditionKind::kApplyAndSkipRest : ConditionKind::kApply;
   }
 
@@ -465,8 +471,14 @@ std::vector<std::pair<State, int>> RuleSpecialComputeLocationGPU::Apply(
 
 SketchGenerationRule::ConditionKind RuleFuseReductionGPU::MeetCondition(
     const SketchPolicyNode& policy, const State& state, int stage_id) const {
-  const std::set<int>& consumers = GetConsumers(policy.search_task, state, stage_id);
+  const std::set<int>& split_consumers = GetConsumers(policy.search_task, state, stage_id);
   
+  if (split_consumers.size() != 1) {
+    return ConditionKind::kSkip;
+  }
+
+  const std::set<int>& consumers = GetConsumers(policy.search_task, state, *split_consumers.begin());
+
   if (consumers.size() != 1) {
     return ConditionKind::kSkip;
   }
@@ -494,32 +506,41 @@ SketchGenerationRule::ConditionKind RuleFuseReductionGPU::MeetCondition(
 std::vector<std::pair<State, int>> RuleFuseReductionGPU::Apply(
     const SketchPolicyNode& policy, const State& state, int stage_id) const {
   State tmp_s = state;
+  stage_id += 1;
+  const std::set<int>& producers = GetProducers(policy.search_task, state, stage_id);
+  ICHECK_EQ(producers.size(), 1);
+  int cache_write_stage_id = *producers.begin();
+
+  std::string multi_level_tiling_structure = "SSSKRRSRS";
+  std::string follow_tiling_structure = "SSKRRSRS";
+
+  std::vector<int> spatial_split_step_ids;
+  State base_state =
+      DoReductionMultiLevelTiling(state, cache_write_stage_id, multi_level_tiling_structure, &spatial_split_step_ids);
+
+  base_state = SecondTiling(base_state, stage_id, spatial_split_step_ids, 3);
+  const Iterator& target_iter =
+      base_state->stages[stage_id]->iters[3 * spatial_split_step_ids.size() + 1];
+  base_state.compute_at(cache_write_stage_id, stage_id, target_iter);
+
   const std::set<int>& consumers = GetConsumers(policy.search_task, state, stage_id);
   ICHECK_EQ(consumers.size(), 1);
 
   int target_stage_id = *consumers.begin();
 
-  std::string multi_level_tiling_structure = GetStringParam(policy.params, SketchParamKey::MultiLevelTiling::gpu_structure);
-  multi_level_tiling_structure.insert(3, 1, 'K');
-  std::vector<int> spatial_split_step_ids;
-  State base_state =
-      DoReductionMultiLevelTiling(state, stage_id, multi_level_tiling_structure, &spatial_split_step_ids);
-
   std::vector<std::pair<State, int>> ret;
-  std::vector<int> follow_tiling_levels =
-      IsGPUTask(policy.search_task) ? std::vector<int>{3} : std::vector<int>{1, 2};
+  std::vector<int> follow_tiling_levels = std::vector<int>{2};
   for (int level : follow_tiling_levels) {
-    if (tolower(multi_level_tiling_structure[level - 1]) != 's') {
+    if (tolower(follow_tiling_structure[level - 1]) != 's') {
       continue;
     }
     State tmp_s = base_state;
     tmp_s = ReductionTiling(tmp_s, target_stage_id, spatial_split_step_ids, level);
     const Iterator& target_iter =
-        tmp_s->stages[target_stage_id]->iters[level * spatial_split_step_ids.size()];
+        tmp_s->stages[target_stage_id]->iters[spatial_split_step_ids.size()];
     tmp_s.compute_at(stage_id, target_stage_id, target_iter);
-    ret.emplace_back(std::move(tmp_s), stage_id - 1);
+    ret.emplace_back(std::move(tmp_s), stage_id - 2);
   }
-
   return ret;
 }
 
@@ -815,6 +836,338 @@ PopulationGenerationRule::ResultKind InitVectorization::Apply(SketchPolicyNode* 
   return ResultKind::kValid;
 }
 
+// PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* policy, State* state,
+//                                                            std::mt19937* rand_gen) const {
+//   // Collect all stages that are roots of stages that perform multi-level tiling.
+//   std::set<int> multi_level_tiling_root_set;
+//   for (size_t stage_id = 0; stage_id < (*state)->stages.size(); ++stage_id) {
+//     if (NeedsMultilevelTiling(policy->search_task, *state, stage_id)) {
+//       const Stage& stage = (*state)->stages[stage_id];
+//       if (stage->compute_at == ComputeAtKind::kInlined) {
+//         continue;
+//       } else if (stage->compute_at != ComputeAtKind::kIter) {
+//         // This stage is not multi-level tiled,
+//         // so it must be produced by RuleCrossThreadReduction.
+//         ICHECK(HasCrossThreadReduction(*state, stage_id));
+//       } else {
+//         const auto res = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+//         ICHECK(res != (*state)->attach_map->stage_to_attach_iter.end());
+//         multi_level_tiling_root_set.insert(res->second.first);
+//       }
+//     }
+//   }
+
+//   *state = policy->search_task->compute_dag.InferBound(*state);
+
+//   for (int stage_id = (*state)->stages.size() - 1; stage_id >= 0; --stage_id) {
+//     const Stage& stage = (*state)->stages[stage_id];
+
+//     if (stage->compute_at == ComputeAtKind::kInlined || stage->op_type == StageKind::kPlaceholder) {
+//       continue;
+//     }
+
+//     // Deal with the cross-thread reduction generated by RuleCrossThreadReduction
+//     if (HasCrossThreadReduction(*state, stage_id)) {
+//       if (stage->compute_at != ComputeAtKind::kRoot) {
+//         continue;
+//       }
+
+//       Iterator fused_it;
+//       *state = std::move(FuseAllOuterSpaceIterators(*state, stage_id, &fused_it));
+//       state->bind(stage_id, fused_it, IteratorAnnotation::kBlockX);
+//       continue;
+//     }
+
+//     // Skip if this stage has already been annotaed with threadIdx.x
+//     if (HasAnnotatedIter(stage, IteratorAnnotation::kThreadX)) {
+//       continue;
+//     }
+
+//     if (stage->compute_at == ComputeAtKind::kRoot) {
+//       // This stage has not been tiled, but in GPU schedule, we must tile the root stage
+//       // to do thread binding
+//       if (!multi_level_tiling_root_set.count(stage_id)) {
+//         Iterator fused_it;
+//         *state = FuseAllOuterSpaceIterators(*state, stage_id, &fused_it);
+
+//         if (GetExtent(fused_it) <= policy->search_task->hardware_params->warp_size) {
+//           state->bind(stage_id, fused_it, IteratorAnnotation::kThreadX);
+//         } else {
+//           // Set threadIdx.x = default_warp_size by default.
+//           // The later EvolutionarySearch will try more possibility
+//           const auto& split_its = state->split(
+//               stage_id, fused_it, {Integer(policy->search_task->hardware_params->warp_size)});
+//           state->bind(stage_id, split_its[0], IteratorAnnotation::kBlockX);
+//           state->bind(stage_id, split_its[1], IteratorAnnotation::kThreadX);
+//         }
+//         continue;
+//       }
+
+//       // Otherwise, this is a tiled root stage, we assume it should be tiled with 3 space level
+//       // in the outer iterators.
+//       // The remaining part deals with the thread binding for multi-level tiled stages
+//       auto pop = stage->op.as<te::ComputeOpNode>();
+//       std::vector<Iterator> to_fuse;
+//       int total_space_extent = 1;
+//       for (const auto& i : pop->root_iter_vars()) {
+//         ICHECK(i->dom.defined());
+//         const auto& pint = i->dom->extent.as<IntImmNode>();
+//         ICHECK(pint);
+//         total_space_extent *= pint->value;
+//       }
+
+//       bool check_min_thread_extent = true;
+//       // If the total space extent is too small, disable the check of minimal thread extent
+//       if (total_space_extent <= policy->search_task->hardware_params->warp_size * 2) {
+//         check_min_thread_extent = false;
+//       }
+
+//       // Fuse the outermost space tile as blockIdx
+//       for (size_t i = 0; i < pop->axis.size(); i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if (!StrEndsWith(it->name, ".0")) {
+//           break;
+//         }
+//         to_fuse.push_back(it);
+//       }
+//       const auto& blockidx_it = state->fuse(stage_id, to_fuse);
+//       state->bind(stage_id, blockidx_it, IteratorAnnotation::kBlockX);
+
+//       // Fuse the second outermost space tile as vthread
+//       std::vector<Iterator> tmp_order;
+//       to_fuse.clear();
+//       for (size_t i = 0; i < pop->axis.size() + 1; i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if(StrEndsWith(it->name, ".1")){
+//           to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+//         } else {
+//           tmp_order.push_back((*state)->stages[stage_id]->iters[i]);
+//         }
+//       }
+//       const auto& vthread_it = state->fuse(stage_id, to_fuse);
+//       if (GetExtent(vthread_it) > policy->search_task->hardware_params->max_vthread_extent) {
+//         return ResultKind::kInvalid;
+//       }
+//       tmp_order.push_back(vthread_it);
+//       state->reorder(stage_id, tmp_order);
+
+//       std::cout << state->ToStr() << std::endl;
+//       // state->bind(stage_id, vthread_it, IteratorAnnotation::kVThread);
+
+//       // Fuse the third outermost space tile as threadIdx
+//       to_fuse.clear();
+//       for (size_t i = 1; i < pop->axis.size() + 1; i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if (!StrEndsWith(it->name, ".2")) {
+//           break;
+//         }
+//         to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+//       }
+//       const auto& threadidx_it = state->fuse(stage_id, to_fuse);
+//       if (check_min_thread_extent &&
+//           GetExtent(threadidx_it) < policy->search_task->hardware_params->warp_size) {
+//         return ResultKind::kInvalid;
+//       }
+//       state->bind(stage_id, threadidx_it, IteratorAnnotation::kThreadX);
+//       state->bind(stage_id, (*state)->stages[stage_id]->iters[2], IteratorAnnotation::kThreadY);
+//     } else if (stage->compute_at == ComputeAtKind::kIter &&
+//                StrEndsWith(stage->op->name, ".shared")) {
+//       // Do cooperative fetching for the cache read stage.
+//       // Get spatial_split_step_ids from the root stage
+//       const auto& it = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+//       ICHECK(it != (*state)->attach_map->stage_to_attach_iter.end());
+//       Array<Integer> spatial_split_step_ids = GetSpatialSplitStepIds(*state, it->second.first);
+
+//       // Fuse all iterators to do cooperative fetching
+//       Iterator fused = state->fuse(stage_id, (*state)->stages[stage_id]->iters);
+//       // Split out an extra iterator for vectorization
+//       // The later EvolutionarySearch will try more possibility
+//       const auto& iters0 = state->split(stage_id, fused, {Integer(1)});
+//       state->vectorize(stage_id, iters0[1]);
+//       const Iterator& reduce_iter =
+//         (*state)->stages[it->second.first + 1]->iters[2];
+//       Array<Optional<Integer>> reduction_lengths;
+//       reduction_lengths.push_back(Optional<Integer>(Integer((reduce_iter->range->extent).as<tvm::tir::IntImmNode>()->value)));
+//       const auto& iters1 = state->split(stage_id, iters0[0], reduction_lengths);
+//       state->bind(stage_id, iters1[1], IteratorAnnotation::kThreadY);
+//       // Follow split to keep a same thread extent with the root stage
+//       const auto& iters2 =
+//           state->follow_fused_split(stage_id, iters1[0], spatial_split_step_ids, 1, true);
+//       state->bind(stage_id, iters2[1], IteratorAnnotation::kThreadX);
+//     }
+//   }
+//   return ResultKind::kValid;
+// }
+
+// PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* policy, State* state,
+//                                                            std::mt19937* rand_gen) const {
+//   // Collect all stages that are roots of stages that perform multi-level tiling.
+//   std::set<int> multi_level_tiling_root_set;
+//   for (size_t stage_id = 0; stage_id < (*state)->stages.size(); ++stage_id) {
+//     if (NeedsMultilevelTiling(policy->search_task, *state, stage_id)) {
+//       const Stage& stage = (*state)->stages[stage_id];
+//       if (stage->compute_at == ComputeAtKind::kInlined) {
+//         continue;
+//       } else if (stage->compute_at != ComputeAtKind::kIter) {
+//         // This stage is not multi-level tiled,
+//         // so it must be produced by RuleCrossThreadReduction.
+//         ICHECK(HasCrossThreadReduction(*state, stage_id));
+//       } else {
+//         const auto res = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+//         ICHECK(res != (*state)->attach_map->stage_to_attach_iter.end());
+//         multi_level_tiling_root_set.insert(res->second.first);
+//       }
+//     }
+//   }
+
+//   *state = policy->search_task->compute_dag.InferBound(*state);
+
+//   for (int stage_id = (*state)->stages.size() - 1; stage_id >= 0; --stage_id) {
+//     const Stage& stage = (*state)->stages[stage_id];
+
+//     if (stage->compute_at == ComputeAtKind::kInlined || stage->op_type == StageKind::kPlaceholder) {
+//       continue;
+//     }
+
+//     // Deal with the cross-thread reduction generated by RuleCrossThreadReduction
+//     if (HasCrossThreadReduction(*state, stage_id)) {
+//       if (stage->compute_at != ComputeAtKind::kRoot) {
+//         continue;
+//       }
+
+//       Iterator fused_it;
+//       *state = std::move(FuseAllOuterSpaceIterators(*state, stage_id, &fused_it));
+//       state->bind(stage_id, fused_it, IteratorAnnotation::kBlockX);
+//       continue;
+//     }
+
+//     // Skip if this stage has already been annotaed with threadIdx.x
+//     if (HasAnnotatedIter(stage, IteratorAnnotation::kThreadX)) {
+//       continue;
+//     }
+
+//     if (stage->compute_at == ComputeAtKind::kRoot) {
+//       // This stage has not been tiled, but in GPU schedule, we must tile the root stage
+//       // to do thread binding
+//       if (!multi_level_tiling_root_set.count(stage_id)) {
+//         Iterator fused_it;
+//         *state = FuseAllOuterSpaceIterators(*state, stage_id, &fused_it);
+
+//         if (GetExtent(fused_it) <= policy->search_task->hardware_params->warp_size) {
+//           state->bind(stage_id, fused_it, IteratorAnnotation::kThreadX);
+//         } else {
+//           // Set threadIdx.x = default_warp_size by default.
+//           // The later EvolutionarySearch will try more possibility
+//           const auto& split_its = state->split(
+//               stage_id, fused_it, {Integer(policy->search_task->hardware_params->warp_size)});
+//           state->bind(stage_id, split_its[0], IteratorAnnotation::kBlockX);
+//           state->bind(stage_id, split_its[1], IteratorAnnotation::kThreadX);
+//         }
+//         continue;
+//       }
+
+//       // Otherwise, this is a tiled root stage, we assume it should be tiled with 3 space level
+//       // in the outer iterators.
+//       // The remaining part deals with the thread binding for multi-level tiled stages
+//       auto pop = stage->op.as<te::ComputeOpNode>();
+//       std::vector<Iterator> to_fuse;
+//       int total_space_extent = 1;
+//       for (const auto& i : pop->root_iter_vars()) {
+//         ICHECK(i->dom.defined());
+//         const auto& pint = i->dom->extent.as<IntImmNode>();
+//         ICHECK(pint);
+//         total_space_extent *= pint->value;
+//       }
+
+//       bool check_min_thread_extent = true;
+//       // If the total space extent is too small, disable the check of minimal thread extent
+//       if (total_space_extent <= policy->search_task->hardware_params->warp_size * 2) {
+//         check_min_thread_extent = false;
+//       }
+
+//       // Fuse the outermost space tile as blockIdx
+//       for (size_t i = 0; i < pop->axis.size(); i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if (!StrEndsWith(it->name, ".0")) {
+//           break;
+//         }
+//         to_fuse.push_back(it);
+//       }
+//       const auto& blockidx_it = state->fuse(stage_id, to_fuse);
+//       state->bind(stage_id, blockidx_it, IteratorAnnotation::kBlockX);
+
+//       // Fuse the second outermost space tile as vthread
+//       to_fuse.clear();
+//       for (size_t i = 1; i < pop->axis.size() + 1; i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if (!StrEndsWith(it->name, ".1")) {
+//           break;
+//         }
+//         to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+//       }
+//       const auto& vthread_it = state->fuse(stage_id, to_fuse);
+//       if (GetExtent(vthread_it) > policy->search_task->hardware_params->max_vthread_extent) {
+//         return ResultKind::kInvalid;
+//       }
+//       state->bind(stage_id, vthread_it, IteratorAnnotation::kVThread);
+
+//       // Fuse the third outermost space tile as threadIdx
+//       to_fuse.clear();
+//       for (size_t i = 2; i < pop->axis.size() + 2; i++) {
+//         const auto& it = (*state)->stages[stage_id]->iters[i];
+//         // There may be some iterators that are marked with no split, stop if reaches next
+//         // tiling level
+//         if (!StrEndsWith(it->name, ".2")) {
+//           break;
+//         }
+//         to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+//       }
+//       const auto& threadidx_it = state->fuse(stage_id, to_fuse);
+//       if (check_min_thread_extent &&
+//           GetExtent(threadidx_it) < policy->search_task->hardware_params->warp_size) {
+//         return ResultKind::kInvalid;
+//       }
+//       state->bind(stage_id, threadidx_it, IteratorAnnotation::kThreadX);
+//       state->bind(stage_id, (*state)->stages[stage_id]->iters[3], IteratorAnnotation::kThreadY);
+//     } else if (stage->compute_at == ComputeAtKind::kIter &&
+//                StrEndsWith(stage->op->name, ".shared")) {
+//       // Do cooperative fetching for the cache read stage.
+//       // Get spatial_split_step_ids from the root stage
+//       const auto& it = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+//       ICHECK(it != (*state)->attach_map->stage_to_attach_iter.end());
+//       Array<Integer> spatial_split_step_ids = GetSpatialSplitStepIds(*state, it->second.first);
+
+//       // Fuse all iterators to do cooperative fetching
+//       Iterator fused = state->fuse(stage_id, (*state)->stages[stage_id]->iters);
+//       // Split out an extra iterator for vectorization
+//       // The later EvolutionarySearch will try more possibility
+//       const auto& iters0 = state->split(stage_id, fused, {Integer(1)});
+//       state->vectorize(stage_id, iters0[1]);
+//       const Iterator& reduce_iter =
+//         (*state)->stages[it->second.first + 1]->iters[3];
+//       Array<Optional<Integer>> reduction_lengths;
+//       reduction_lengths.push_back(Optional<Integer>(Integer((reduce_iter->range->extent).as<tvm::tir::IntImmNode>()->value)));
+//       const auto& iters1 = state->split(stage_id, iters0[0], reduction_lengths);
+//       state->bind(stage_id, iters1[1], IteratorAnnotation::kThreadY);
+//       // Follow split to keep a same thread extent with the root stage
+//       const auto& iters2 =
+//           state->follow_fused_split(stage_id, iters1[0], spatial_split_step_ids, 1, true);
+//       state->bind(stage_id, iters2[1], IteratorAnnotation::kThreadX);
+//     }
+//   }
+//   return ResultKind::kValid;
+// }
+
 PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* policy, State* state,
                                                            std::mt19937* rand_gen) const {
   // Collect all stages that are roots of stages that perform multi-level tiling.
@@ -829,9 +1182,14 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         // so it must be produced by RuleCrossThreadReduction.
         ICHECK(HasCrossThreadReduction(*state, stage_id));
       } else {
-        const auto res = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
-        ICHECK(res != (*state)->attach_map->stage_to_attach_iter.end());
-        multi_level_tiling_root_set.insert(res->second.first);
+        auto tmp_0 = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+        ICHECK(tmp_0 != (*state)->attach_map->stage_to_attach_iter.end());
+        auto tmp_1 = (*state)->attach_map->stage_to_attach_iter.find(tmp_0->second.first);
+        while(tmp_1 != (*state)->attach_map->stage_to_attach_iter.end()){
+          tmp_0 = tmp_1;
+          tmp_1 = (*state)->attach_map->stage_to_attach_iter.find(tmp_0->second.first);
+        }
+        multi_level_tiling_root_set.insert(tmp_0->second.first);
       }
     }
   }
@@ -881,7 +1239,6 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         }
         continue;
       }
-
       // Otherwise, this is a tiled root stage, we assume it should be tiled with 3 space level
       // in the outer iterators.
       // The remaining part deals with the thread binding for multi-level tiled stages
@@ -906,15 +1263,14 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         const auto& it = (*state)->stages[stage_id]->iters[i];
         // There may be some iterators that are marked with no split, stop if reaches next
         // tiling level
-        if (!StrEndsWith(it->name, ".0")) {
+        if (StrEndsWith(it->name, ".1")) {
           break;
         }
         to_fuse.push_back(it);
       }
       const auto& blockidx_it = state->fuse(stage_id, to_fuse);
       state->bind(stage_id, blockidx_it, IteratorAnnotation::kBlockX);
-
-      // Fuse the second outermost space tile as vthread
+      // Fuse the second outermost space tile as threadIdx
       to_fuse.clear();
       for (size_t i = 1; i < pop->axis.size() + 1; i++) {
         const auto& it = (*state)->stages[stage_id]->iters[i];
@@ -925,48 +1281,74 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         }
         to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
       }
-      const auto& vthread_it = state->fuse(stage_id, to_fuse);
-      if (GetExtent(vthread_it) > policy->search_task->hardware_params->max_vthread_extent) {
-        return ResultKind::kInvalid;
-      }
-      state->bind(stage_id, vthread_it, IteratorAnnotation::kVThread);
-
-      // Fuse the third outermost space tile as threadIdx
-      to_fuse.clear();
-      for (size_t i = 2; i < pop->axis.size() + 2; i++) {
-        const auto& it = (*state)->stages[stage_id]->iters[i];
-        // There may be some iterators that are marked with no split, stop if reaches next
-        // tiling level
-        if (!StrEndsWith(it->name, ".2")) {
-          break;
-        }
-        to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
-      }
       const auto& threadidx_it = state->fuse(stage_id, to_fuse);
       if (check_min_thread_extent &&
           GetExtent(threadidx_it) < policy->search_task->hardware_params->warp_size) {
         return ResultKind::kInvalid;
       }
       state->bind(stage_id, threadidx_it, IteratorAnnotation::kThreadX);
-      state->bind(stage_id, (*state)->stages[stage_id]->iters[3], IteratorAnnotation::kThreadY);
-    } else if (stage->compute_at == ComputeAtKind::kIter &&
-               StrEndsWith(stage->op->name, ".shared")) {
-      // Do cooperative fetching for the cache read stage.
-      // Get spatial_split_step_ids from the root stage
-      const auto& it = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
-      ICHECK(it != (*state)->attach_map->stage_to_attach_iter.end());
-      Array<Integer> spatial_split_step_ids = GetSpatialSplitStepIds(*state, it->second.first);
+      state->bind(stage_id, (*state)->stages[stage_id]->iters[2], IteratorAnnotation::kThreadY);
+    } else if (stage->compute_at == ComputeAtKind::kIter) {
+      if (StrEndsWith(stage->op->name, ".tsplit")) {
+        auto pop = stage->op.as<te::ComputeOpNode>();
+        std::vector<Iterator> to_fuse;
+        const std::set<int>& producers = GetProducers(policy->search_task, *state, stage_id);
+        ICHECK_EQ(producers.size(), 1);
+        Array<Integer> spatial_split_step_ids = GetSpatialSplitStepIds(*state, *producers.begin());
 
-      // Fuse all iterators to do cooperative fetching
-      Iterator fused = state->fuse(stage_id, (*state)->stages[stage_id]->iters);
-      // Split out an extra iterator for vectorization
-      // The later EvolutionarySearch will try more possibility
-      const auto& iters0 = state->split(stage_id, fused, {Integer(1)});
-      state->vectorize(stage_id, iters0[1]);
-      // Follow split to keep a same thread extent with the root stage
-      const auto& iters1 =
-          state->follow_fused_split(stage_id, iters0[0], spatial_split_step_ids, 1, true);
-      state->bind(stage_id, iters1[1], IteratorAnnotation::kThreadX);
+        // Fuse the second outermost space tile as vthread
+        to_fuse.clear();
+        for (size_t i = spatial_split_step_ids.size() + 1; i < pop->axis.size() + spatial_split_step_ids.size() + 1; i++) {
+          const auto& it = (*state)->stages[stage_id]->iters[i];
+          // There may be some iterators that are marked with no split, stop if reaches next
+          // tiling level
+          if (!StrEndsWith(it->name, ".1")) {
+            break;
+          }
+          to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+        }
+        const auto& vthread_it = state->fuse(stage_id, to_fuse);
+        if (GetExtent(vthread_it) > policy->search_task->hardware_params->max_vthread_extent) {
+          return ResultKind::kInvalid;
+        }
+        state->bind(stage_id, vthread_it, IteratorAnnotation::kVThread);
+        to_fuse.clear();
+        for (size_t i = spatial_split_step_ids.size() + 2; i < pop->axis.size() + spatial_split_step_ids.size() + 2; i++) {
+          const auto& it = (*state)->stages[stage_id]->iters[i];
+          // There may be some iterators that are marked with no split, stop if reaches next
+          // tiling level
+          if (!StrEndsWith(it->name, ".2")) {
+            break;
+          }
+          to_fuse.push_back((*state)->stages[stage_id]->iters[i]);
+        }
+        const auto& threadidx_it = state->fuse(stage_id, to_fuse);
+        state->bind(stage_id, threadidx_it, IteratorAnnotation::kThreadX);
+        state->bind(stage_id, (*state)->stages[stage_id]->iters[spatial_split_step_ids.size() + 3], IteratorAnnotation::kThreadY);
+      } else if (StrEndsWith(stage->op->name, ".shared")) {
+        // Do cooperative fetching for the cache read stage.
+        // Get spatial_split_step_ids from the root stage
+        const auto& it = (*state)->attach_map->stage_to_attach_iter.find(stage_id);
+        ICHECK(it != (*state)->attach_map->stage_to_attach_iter.end());
+        Array<Integer> spatial_split_step_ids = GetSpatialSplitStepIds(*state, it->second.first);
+
+        // Fuse all iterators to do cooperative fetching
+        Iterator fused = state->fuse(stage_id, (*state)->stages[stage_id]->iters);
+        // Split out an extra iterator for vectorization
+        // The later EvolutionarySearch will try more possibility
+        const auto& iters0 = state->split(stage_id, fused, {Integer(1)});
+        state->vectorize(stage_id, iters0[1]);
+        const Iterator& reduce_iter =
+          (*state)->stages[it->second.first + 1]->iters[3 * spatial_split_step_ids.size() + 1];
+        Array<Optional<Integer>> reduction_lengths;
+        reduction_lengths.push_back(Optional<Integer>(Integer((reduce_iter->range->extent).as<tvm::tir::IntImmNode>()->value)));
+        const auto& iters1 = state->split(stage_id, iters0[0], reduction_lengths);
+        state->bind(stage_id, iters1[1], IteratorAnnotation::kThreadY);
+        // Follow split to keep a same thread extent with the root stage
+        const auto& iters2 =
+            state->follow_fused_split(stage_id, iters1[0], spatial_split_step_ids, 1, true);
+        state->bind(stage_id, iters2[1], IteratorAnnotation::kThreadX);
+      }
     }
   }
   return ResultKind::kValid;

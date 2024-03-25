@@ -143,6 +143,9 @@ StepNode* Step::CopyOnWrite() {
     } else if (const auto& ps = as<FollowSplitStepNode>()) {
       auto n = make_object<FollowSplitStepNode>(*ps);
       ObjectPtr<Object>(std::move(n)).swap(data_);
+    } else if (const auto& ps = as<FollowSplitWithoutVthreadStepNode>()) {
+      auto n = make_object<FollowSplitWithoutVthreadStepNode>(*ps);
+      ObjectPtr<Object>(std::move(n)).swap(data_);
     } else if (const auto& ps = as<FollowFusedSplitStepNode>()) {
       auto n = make_object<FollowFusedSplitStepNode>(*ps);
       ObjectPtr<Object>(std::move(n)).swap(data_);
@@ -192,6 +195,8 @@ Step StepReadFromRecord(dmlc::JSONReader* reader) {
     return SplitStep(reader);
   } else if (name == FollowSplitStepNode::record_prefix_str) {
     return FollowSplitStep(reader);
+  } else if (name == FollowSplitWithoutVthreadStepNode::record_prefix_str) {
+    return FollowSplitWithoutVthreadStep(reader);
   } else if (name == FollowFusedSplitStepNode::record_prefix_str) {
     return FollowFusedSplitStep(reader);
   } else if (name == StorageAlignStepNode::record_prefix_str) {
@@ -228,7 +233,9 @@ void StepApplyToState(const Step& step, State* state, const ComputeDAG& dag) {
     ps->ApplyToState(state);
   } else if (auto ps = step.as<FollowSplitStepNode>()) {
     ps->ApplyToState(state);
-  } else if (auto ps = step.as<FollowFusedSplitStepNode>()) {
+  } else if (auto ps = step.as<FollowSplitWithoutVthreadStepNode>()){
+    ps->ApplyToState(state);
+  }else if (auto ps = step.as<FollowFusedSplitStepNode>()) {
     ps->ApplyToState(state);
   } else if (auto ps = step.as<StorageAlignStepNode>()) {
     ps->ApplyToState(state);
@@ -262,6 +269,8 @@ void StepApplyToSchedule(const Step& step, Array<te::Stage>* stages, StageToAxes
   } else if (auto ps = step.as<SplitStepNode>()) {
     ps->ApplyToSchedule(stages, stage_to_axes);
   } else if (auto ps = step.as<FollowSplitStepNode>()) {
+    ps->ApplyToSchedule(stages, stage_to_axes, transform_steps);
+  } else if (auto ps = step.as<FollowSplitWithoutVthreadStepNode>()) {
     ps->ApplyToSchedule(stages, stage_to_axes, transform_steps);
   } else if (auto ps = step.as<FollowFusedSplitStepNode>()) {
     ps->ApplyToSchedule(stages, stage_to_axes, transform_steps);
@@ -298,6 +307,8 @@ String StepPrintAsPythonAPI(const Step& step, Array<te::Stage>* stages,
   } else if (auto ps = step.as<SplitStepNode>()) {
     return ps->PrintAsPythonAPI(stages, stage_to_axes);
   } else if (auto ps = step.as<FollowSplitStepNode>()) {
+    return ps->PrintAsPythonAPI(stages, stage_to_axes, transform_steps);
+  } else if (auto ps = step.as<FollowSplitWithoutVthreadStepNode>()) {
     return ps->PrintAsPythonAPI(stages, stage_to_axes, transform_steps);
   } else if (auto ps = step.as<FollowFusedSplitStepNode>()) {
     return ps->PrintAsPythonAPI(stages, stage_to_axes, transform_steps);
@@ -783,6 +794,13 @@ void ReorderStepNode::ApplyToSchedule(Array<te::Stage>* stages,
                                       StageToAxesMap* stage_to_axes) const {
   auto stage = (*stages)[stage_id];
   const Array<IterVar>& axes = stage_to_axes->at(stage);
+  if(after_ids.size() != axes.size()){
+    std::cout << "stage: " << stage_id << " " << stage->op->name << std::endl;
+    
+  }
+  // for (auto iter : stage->iter){
+  //   std::cout << id->
+  // }
   ICHECK_EQ(after_ids.size(), axes.size());
 
   Array<IterVar> new_axes;
@@ -816,7 +834,7 @@ String ReorderStepNode::PrintAsPythonAPI(Array<te::Stage>* stages,
 }
 
 /********** Split **********/
-// common part for SplitStep, FollowSplitStep, and FollowFusedSplitStep
+// common part for SplitStep, FollowSplitStep, FollowSplitWithoutVthreadStep, and FollowFusedSplitStep
 Array<Iterator> ApplySplitToState(State* state, int stage_id, int iter_id,
                                   const Array<Optional<Integer>>& lengths, bool inner_to_outer) {
   const Stage& stage = (*state)->stages[stage_id];
@@ -1069,6 +1087,7 @@ Array<Optional<Integer>> FollowSplitStepNode::ExtractSplitLengths(
 
   Array<Optional<Integer>> lengths;
   lengths.reserve(n_split);
+
   int j = 0;
   // Get the first (n_split-1) split factors of followed src_step.
   for (; j < n_split - 1; ++j) {
@@ -1132,6 +1151,103 @@ String FollowSplitStepNode::PrintAsPythonAPI(Array<te::Stage>* stages,
                                ExtractSplitLengths(transform_steps), true);
 }
 
+/********** Follow Split Without Vthread**********/
+FollowSplitWithoutVthreadStep::FollowSplitWithoutVthreadStep(int stage_id, int iter_id, int src_step_id, int n_split) {
+  auto node = make_object<FollowSplitWithoutVthreadStepNode>();
+  node->stage_id = stage_id;
+  node->iter_id = iter_id;
+  node->src_step_id = src_step_id;
+  node->n_split = n_split;
+  data_ = std::move(node);
+}
+
+void FollowSplitWithoutVthreadStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
+  writer->WriteArraySeperator();
+  writer->WriteString(record_prefix_str);
+  writer->WriteArrayItem(stage_id);
+  writer->WriteArrayItem(iter_id);
+  writer->WriteArrayItem(src_step_id);
+  writer->WriteArrayItem(n_split);
+}
+
+Array<Optional<Integer>> FollowSplitWithoutVthreadStepNode::ExtractSplitLengths(
+    const Array<Step>& transform_steps) const {
+  // Make sure src_step_id is within the range of transform_steps.
+  ICHECK_LT(src_step_id, transform_steps.size());
+  auto ps = transform_steps[src_step_id].as<SplitStepNode>();
+  ICHECK(ps != nullptr);
+
+  // Make sure the size of ps->lengths is not smaller than n_split-1.
+  // Note that the number of actual splitting factors of src_step is ps->lengths.size()+1.
+  ICHECK_LE(n_split, ps->lengths.size() + 1);
+  ICHECK(ps != nullptr);
+
+  Array<Optional<Integer>> lengths;
+  lengths.reserve(n_split);
+
+  lengths.push_back(ps->lengths[1]);
+
+  PrimExpr last_factor = 1;
+  if (ps->lengths[0]) {
+    last_factor *= ps->lengths[0].value();
+  } else {
+    last_factor = PrimExpr();
+  }
+  int j = 2;
+  for (; j < static_cast<int>(ps->lengths.size()); ++j) {
+    if (ps->lengths[j]) {
+      last_factor *= ps->lengths[j].value();
+    } else {
+      last_factor = PrimExpr();
+      break;
+    }
+  }
+  if (last_factor.defined()) {
+    lengths.push_back(Downcast<Integer>(last_factor));
+  } else {
+    lengths.push_back(NullOpt);
+  }
+  
+  return lengths;
+}
+
+FollowSplitWithoutVthreadStep::FollowSplitWithoutVthreadStep(dmlc::JSONReader* reader) {
+  auto node = make_object<FollowSplitWithoutVthreadStepNode>();
+  bool s;
+  s = reader->NextArrayItem();
+  ICHECK(s);
+  reader->Read(&node->stage_id);
+  s = reader->NextArrayItem();
+  ICHECK(s);
+  reader->Read(&node->iter_id);
+  s = reader->NextArrayItem();
+  ICHECK(s);
+  reader->Read(&node->src_step_id);
+  s = reader->NextArrayItem();
+  ICHECK(s);
+  reader->Read(&node->n_split);
+  data_ = std::move(node);
+}
+
+Array<Iterator> FollowSplitWithoutVthreadStepNode::ApplyToState(State* state) const {
+  return ApplySplitToState(state, stage_id, iter_id, ExtractSplitLengths((*state)->transform_steps),
+                           true);
+}
+
+Array<IterVar> FollowSplitWithoutVthreadStepNode::ApplyToSchedule(Array<te::Stage>* stages,
+                                                    StageToAxesMap* stage_to_axes,
+                                                    const Array<Step>& transform_steps) const {
+  return ApplySplitToSchedule(stages, stage_to_axes, stage_id, iter_id,
+                              ExtractSplitLengths(transform_steps), true);
+}
+
+String FollowSplitWithoutVthreadStepNode::PrintAsPythonAPI(Array<te::Stage>* stages,
+                                             StageToAxesMap* stage_to_axes,
+                                             const Array<Step>& transform_steps) const {
+  return PrintSplitAsPythonAPI(stages, stage_to_axes, stage_id, iter_id,
+                               ExtractSplitLengths(transform_steps), true);
+}
+
 /********** Follow Fused Split **********/
 FollowFusedSplitStep::FollowFusedSplitStep(int stage_id, int iter_id,
                                            const Array<Integer>& src_step_ids, int level,
@@ -1179,21 +1295,19 @@ void FollowFusedSplitStepNode::WriteToRecord(dmlc::JSONWriter* writer) const {
 Optional<Integer> FollowFusedSplitStepNode::ExtractSplitLength(
     const Array<Step>& transform_steps) const {
   PrimExpr ret(1);
-  std::cout << "pslengths: ";
+
   for (auto src_step_id : src_step_ids) {
     // Make sure the src_step_id is within the range of transform_steps.
     ICHECK_LT(src_step_id.IntValue(), transform_steps.size());
     auto ps = transform_steps[src_step_id.IntValue()].as<SplitStepNode>();
     ICHECK(ps != nullptr);
     // Multiple the splitting factor on corresponding splitting level of src_steps.
-    std::cout << ps->lengths.size() << " ";
     if (ps->lengths[level] && ret.defined()) {
       ret *= ps->lengths[level].value();
     } else {
       return NullOpt;
     }
   }
-  std::cout << std::endl;
   return Downcast<Integer>(ret);
 }
 
