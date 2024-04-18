@@ -331,8 +331,6 @@ Array<State> SketchPolicyNode::GenerateSketches() {
     pnext->clear();
     for (const State& state : *pnow) {
       int stage_id = cur_stage_id_map[state];
-      std::cout << stage_id << std::endl;
-      std::cout << state.ToStr(false) << std::endl;
 
       // Reaches to the terminal stage
       if (stage_id < 0) {
@@ -469,6 +467,9 @@ Array<State> SketchPolicyNode::SampleInitPopulation(const Array<State>& sketches
     if (unchange_cnt == 5) {
       // Reduce the target size to avoid too-long time in this phase if no valid state was found
       // in the past iterations
+      if (sample_init_min_pop_ == 1){
+        throw std::runtime_error("Too many failures or duplications, tuning is aborted.");
+      }
       if (sample_init_min_pop_ > 1) {
         sample_init_min_pop_ /= 2;
         StdCout(verbose) << "#Target has been reduced to " << sample_init_min_pop_

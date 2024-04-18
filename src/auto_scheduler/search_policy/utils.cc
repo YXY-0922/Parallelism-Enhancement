@@ -591,8 +591,12 @@ State ReductionTiling(const State& state, int stage_id, const std::vector<int>& 
     no_split_name_in_stage_cnt += block_level_split_name_set.count(iter->name);
     no_split_name_in_stage_cnt += thread_level_split_name_set.count(iter->name);
   }
-
-  ICHECK_EQ(state->stages[stage_id]->iters.size() - no_split_name_in_stage_cnt - 1,
+  for (const auto& iter : state->stages[stage_id]->iters) {
+    if (iter->iter_kind == IteratorKind::kReduction) {
+      no_split_name_in_stage_cnt += 1;
+    }
+  }
+  ICHECK_EQ(state->stages[stage_id]->iters.size() - no_split_name_in_stage_cnt,
             split_step_ids.size());
 
   State tmp_s = state;

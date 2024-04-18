@@ -126,6 +126,7 @@ void InferRootBound(const Stage& stage, const GraphContext& ctx,
   //   - For normal index, use relative location of loop nest./
   //   - For thread index, use the thread scope.
   //
+
   Array<IterVar> stage_attach = ctx.attach_path.at(stage->op);
   // The parent set.
   for (const Operation& op : consumers) {
@@ -233,6 +234,7 @@ Map<IterVar, Range> InferBound(const Schedule& sch) {
 
     // bind bound of root iter vars.
     for (auto iv : stage->op->root_iter_vars()) {
+      
       auto it = ret.find(iv);
       if (it != ret.end()) {
         analyzer.Bind(iv->var, it->second);
