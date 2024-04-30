@@ -1123,10 +1123,20 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         // The later EvolutionarySearch will try more possibility
         const auto& iters0 = state->split(stage_id, fused, {Integer(1)});
         state->vectorize(stage_id, iters0[1]);
-        const Iterator& reduce_iter =
-          (*state)->stages[it->second.first + 1]->iters[3 * spatial_split_step_ids.size() + 1];
+        const std::set<std::string>& block_level_split_name_set =
+            (*state)->stages[it->second.first]->op->attrs.count(FuseReductionIterKey::block_level_split)
+                ? GetIterNameSetParam((*state)->stages[it->second.first]->op->attrs, FuseReductionIterKey::block_level_split)
+                : std::set<std::string>();
+        const std::set<std::string>& thread_level_split_name_set =
+            (*state)->stages[it->second.first]->op->attrs.count(FuseReductionIterKey::thread_level_split)
+                ? GetIterNameSetParam((*state)->stages[it->second.first]->op->attrs, FuseReductionIterKey::thread_level_split)
+                : std::set<std::string>();
+        
+        const std::set<int>& consumers = GetConsumers(policy->search_task, *state, it->second.first);
+        ICHECK_EQ(consumers.size(), 1);
+        int tsplit_stage_id = *consumers.begin();
         Array<Optional<Integer>> reduction_lengths;
-        reduction_lengths.push_back(Optional<Integer>(Integer((reduce_iter->range->extent).as<tvm::tir::IntImmNode>()->value)));
+        reduction_lengths.push_back(Optional<Integer>(Integer(((*state)->stages[tsplit_stage_id]->iters[spatial_split_step_ids.size() + block_level_split_name_set.size()+2]->range->extent).as<tvm::tir::IntImmNode>()->value)));
         const auto& iters1 = state->split(stage_id, iters0[0], reduction_lengths);
         state->bind(stage_id, iters1[1], IteratorAnnotation::kThreadY);
         // Follow split to keep a same thread extent with the root stage
@@ -1136,6 +1146,7 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
       }
     }
   }
+
   return ResultKind::kValid;
 }
 
