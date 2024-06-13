@@ -302,20 +302,36 @@ Array<Tensor> CacheWriteWithReLayout(Schedule sch, const Array<Tensor>& tensor_a
   std::unordered_map<IterVar, Range> dom_map;
   Map<String, ObjectRef> new_attrs;
 
-  for(const auto& attr : compute->attrs){
-    Array<String> tmp_iters;
-    const auto& iter_names = attr.second.as<ArrayNode>();
-    for(int i = 0; i < iter_names->size(); ++i){
-      std::string iter_name = iter_names->at(i).as<StringObj>()->data;
-      // if(!StrEndsWith(iter_name, "_c")){
-      //   iter_name = iter_name + "_c";
-      // }
-      iter_name = iter_name + "_c";
-      String tmp_name = iter_name;
-      tmp_iters.push_back(tmp_name);
+  for (const auto& attr : compute->attrs) {
+    // 判断attr.first是否是'auto_scheduler_block_level_split'或'auto_scheduler_thread_level_split'
+    if (attr.first == "auto_scheduler_block_level_split" || attr.first == "auto_scheduler_thread_level_split") {
+        Array<String> tmp_iters;
+        const auto& iter_names = attr.second.as<ArrayNode>();
+
+        // 检查 iter_names 是否为 nullptr
+        if (iter_names == nullptr) {
+            std::cerr << "Error: iter_names is nullptr for key " << attr.first << std::endl;
+            continue; // 跳过这个属性，避免段错误
+        }
+
+        for (int i = 0; i < iter_names->size(); ++i) {
+            auto iter_name_node = iter_names->at(i).as<StringObj>();
+            // 检查 iter_name_node 是否为 nullptr
+            if (iter_name_node == nullptr) {
+                std::cerr << "Error: iter_name_node is nullptr at index " << i << " for key " << attr.first << std::endl;
+                continue; // 跳过这个迭代，避免段错误
+            }
+
+            std::string iter_name = iter_name_node->data;
+            iter_name = iter_name + "_c";
+            String tmp_name = iter_name;
+            tmp_iters.push_back(tmp_name);
+        }
+        new_attrs.Set(attr.first, tmp_iters);
+    } else {
+        new_attrs.Set(attr.first, attr.second);
     }
-    new_attrs.Set(attr.first, tmp_iters);
-  }
+}
 
   std::unordered_map<const VarNode*, PrimExpr> vsub;
   std::unordered_map<const VarNode*, PrimExpr> vsub2newvar;

@@ -29,6 +29,7 @@ import logging
 
 import numpy as np
 
+from .search_task import SearchTask
 from .search_policy import SearchPolicy, SketchPolicy, PreloadMeasuredStates
 from .cost_model import RandomModel, XGBModel
 from .utils import array_mean
@@ -443,40 +444,62 @@ class TaskScheduler:
                 break
 
     def _tune_task(self, task_idx):
-        """Tune the select task for one round"""
+        if isinstance(self.tasks[task_idx], SearchTask):
+            """Tune the select task for one round"""
 
-        # Run pre-tune callbacks
-        for callback in self.callbacks:
-            callback.pre_tune(self, task_idx)
+            # Run pre-tune callbacks
+            for callback in self.callbacks:
+                callback.pre_tune(self, task_idx)
 
-        measure_inputs, measure_results = self.search_policies[task_idx].continue_search_one_round(
-            self.num_measures_per_round, self.measurer
-        )
+            measure_inputs, measure_results = self.search_policies[task_idx].continue_search_one_round(
+                self.num_measures_per_round, self.measurer
+            )
 
-        self.task_cts[task_idx] += 1
+            self.task_cts[task_idx] += 1
 
-        for res in measure_results:
-            cost = array_mean(res.costs)
+            for res in measure_results:
+                cost = array_mean(res.costs)
+                if cost < self.best_costs[task_idx]:
+                    self.task_best_cts[task_idx] = self.task_cts[task_idx]
+                    self.best_costs[task_idx] = cost
+
+            # Stop tuning this task in the rest of the process if its search space has been
+            # fully explored or it has no improvement for a long while.
+            no_change_trials = (
+                self.task_cts[task_idx] - self.task_best_cts[task_idx]
+            ) * self.num_measures_per_round
+            if len(measure_inputs) == 0 or no_change_trials > self.early_stopping_task:
+                self.dead_tasks.add(task_idx)
+
+            self.task_costs_history[task_idx].append(self.best_costs[task_idx])
+
+            self.ct += len(measure_inputs)
+            self.cur_score = self._compute_score(self.best_costs)
+
+            # Run post-tune callbacks
+            for callback in self.callbacks:
+                callback.post_tune(self, task_idx)
+        else:
+            cost = self.tasks[task_idx].SearchOneRound()
+            self.task_cts[task_idx] += 1
+
             if cost < self.best_costs[task_idx]:
                 self.task_best_cts[task_idx] = self.task_cts[task_idx]
                 self.best_costs[task_idx] = cost
 
-        # Stop tuning this task in the rest of the process if its search space has been
-        # fully explored or it has no improvement for a long while.
-        no_change_trials = (
-            self.task_cts[task_idx] - self.task_best_cts[task_idx]
-        ) * self.num_measures_per_round
-        if len(measure_inputs) == 0 or no_change_trials > self.early_stopping_task:
-            self.dead_tasks.add(task_idx)
+            # Stop tuning this task in the rest of the process if its search space has been
+            # fully explored or it has no improvement for a long while.
+            no_change_trials = (
+                self.task_cts[task_idx] - self.task_best_cts[task_idx]
+            ) * self.num_measures_per_round
+            if no_change_trials > self.early_stopping_task:
+                self.dead_tasks.add(task_idx)
 
-        self.task_costs_history[task_idx].append(self.best_costs[task_idx])
+            self.task_costs_history[task_idx].append(self.best_costs[task_idx])
 
-        self.ct += len(measure_inputs)
-        self.cur_score = self._compute_score(self.best_costs)
+            self.ct += len(self.num_measures_per_round*self.task_cts[task_idx])
+            self.cur_score = self._compute_score(self.best_costs)
 
-        # Run post-tune callbacks
-        for callback in self.callbacks:
-            callback.post_tune(self, task_idx)
 
     def _compute_score(self, costs):
         """compute the objective function"""
@@ -633,20 +656,23 @@ class LogEstimatedLatency(TaskSchedulerCallback):
     """
 
     def __init__(self, log_file):
-        if os.path.exists(log_file):  # Remove existing log
-            os.remove(log_file)
+        # if os.path.exists(log_file):  # Remove existing log
+        #     log_file = log_file.replace(".tsv", "_1.tsv")
+        #     # os.remove(log_file)
 
-        self.log_file = log_file
+        # self.log_file = log_file
+        pass
 
     def post_tune(self, task_scheduler, task_id):
-        if all(cost < 1e9 for cost in task_scheduler.best_costs):
-            total_latency_str = "%.3f" % (task_scheduler.cur_score * 1e3)
-        else:
-            total_latency_str = "N/A"
+        # if all(cost < 1e9 for cost in task_scheduler.best_costs):
+        #     total_latency_str = "%.3f" % (task_scheduler.cur_score * 1e3)
+        # else:
+        #     total_latency_str = "N/A"
 
-        with open(self.log_file, "a") as filep:
-            filep.write(
-                "ElapsedTime(s)\t%.0f\tEstimatedLatency(ms)\t%s\tTrials\t%d\n"
-                % (time.time() - task_scheduler.tic, total_latency_str, task_scheduler.ct)
-            )
-            filep.flush()
+        # with open(self.log_file, "a") as filep:
+        #     filep.write(
+        #         "ElapsedTime(s)\t%.0f\tEstimatedLatency(ms)\t%s\tTrials\t%d\n"
+        #         % (time.time() - task_scheduler.tic, total_latency_str, task_scheduler.ct)
+        #     )
+        #     filep.flush()
+        pass
