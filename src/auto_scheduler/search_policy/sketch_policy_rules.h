@@ -110,6 +110,8 @@ DEFINE_SKETCH_GENERATION_RULE(RuleMultiLevelTiling);
 /*! \brief The rule that performs multi-level tiling and fuses later consumers. */
 DEFINE_SKETCH_GENERATION_RULE(RuleMultiLevelTilingWithFusion);
 
+DEFINE_SKETCH_GENERATION_RULE(RuleReductionFusion);
+
 /*! \brief The rule that adds a cache read stage. Mainly used for GPU cooperative fetching,
  * Currently only support 1 to 1 match cache read. */
 DEFINE_SKETCH_GENERATION_RULE(RuleAddCacheRead);

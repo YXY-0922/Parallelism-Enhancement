@@ -109,10 +109,38 @@ std::vector<std::pair<State, int>> RuleMultiLevelTiling::Apply(const SketchPolic
   return {std::make_pair(std::move(tmp_s), stage_id - 1)};
 }
 
+
+/*****************RuleReductionFusion****************/
+SketchGenerationRule::ConditionKind RuleReductionFusion::MeetCondition(
+    const SketchPolicyNode& policy, const State& state, int stage_id) const {
+  if (!NeedsMultilevelTiling(policy.search_task, state, stage_id) &&
+      HasSingleElementwiseMatchedConsumer(policy.search_task, state, stage_id)) {
+    // Always do fusion for stage with cache_write or is in GPU policy
+    return IsGPUTask(policy.search_task)
+               ? ConditionKind::kApplyAndSkipRest
+               : ConditionKind::kApply;
+  }
+  return ConditionKind::kSkip;
+}
+
+std::vector<std::pair<State, int>> RuleReductionFusion::Apply(
+    const SketchPolicyNode& policy, const State& state, int stage_id) const {
+  int target_stage_id;
+  ICHECK(
+      HasSingleElementwiseMatchedConsumer(policy.search_task, state, stage_id, &target_stage_id));
+  const Iterator& target_iter =
+    state->stages[target_stage_id]->iters[state->stages[target_stage_id]->iters.size() - 1];
+  State tmp_s = state;
+  tmp_s.compute_at(stage_id, target_stage_id, target_iter);
+  return {std::make_pair(tmp_s, stage_id-1)};
+}
+
+
 /********** RuleMultiLevelTilingWithFusion **********/
 
 SketchGenerationRule::ConditionKind RuleMultiLevelTilingWithFusion::MeetCondition(
     const SketchPolicyNode& policy, const State& state, int stage_id) const {
+
   if (NeedsMultilevelTiling(policy.search_task, state, stage_id) &&
       HasSingleElementwiseMatchedConsumer(policy.search_task, state, stage_id)) {
     // Always do fusion for stage with cache_write or is in GPU policy
@@ -218,12 +246,10 @@ SketchGenerationRule::ConditionKind RuleAddCacheWrite::MeetCondition(const Sketc
   if (NeedsMultilevelTiling(policy.search_task, state, stage_id) &&
       !HasSingleElementwiseMatchedConsumer(policy.search_task, state, stage_id)) {
     // An apply and skip rule will be handled in RuleMultiLevelTilingWithFusion
-    if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::block_level_split)){
-      if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::thread_level_split))
-        return ConditionKind::kApplyAndSkipRest;
-      else 
-        return ConditionKind::kSkip;
-    }
+    if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::thread_level_split))
+      return ConditionKind::kApplyAndSkipRest;
+    if (state->stages[stage_id]->op->attrs.count(FuseReductionIterKey::block_level_split))
+      return ConditionKind::kSkip;
     return IsGPUTask(policy.search_task) ? ConditionKind::kApplyAndSkipRest : ConditionKind::kApply;
   }
 
@@ -488,31 +514,11 @@ SketchGenerationRule::ConditionKind RuleFuseReductionGPU::MeetCondition(
     return ConditionKind::kSkip;
   }
 
-  if (state->stages[*split_consumers.begin()]->op->attrs.count(FuseReductionIterKey::block_level_split) &
-      state->stages[*split_consumers.begin()]->op->attrs.count(FuseReductionIterKey::thread_level_split)) {
+  if (state->stages[*split_consumers.begin()]->op->attrs.count(FuseReductionIterKey::thread_level_split)) {
     return ConditionKind::kApplyAndSkipRest;
   } else {
     return ConditionKind::kSkip;
   }
-
-  // int iter_size = state->stages[*consumers.begin()]->iters.size();
-
-  // if (iter_size == 0 || state->stages[stage_id]->iters.size() == 0 || state->stages[stage_id]->iters.size() <= iter_size){
-  //   return ConditionKind::kSkip;
-  // }
-
-  // for (size_t i = 0; i < iter_size - 1; ++i) {
-  //   if((state->stages[*consumers.begin()]->iters[i]->range->min != state->stages[stage_id]->iters[i]->range->min).as<tvm::tir::IntImmNode>()->value||
-  //     (state->stages[*consumers.begin()]->iters[i]->range->extent != state->stages[stage_id]->iters[i]->range->extent).as<tvm::tir::IntImmNode>()->value||
-  //     (state->stages[*consumers.begin()]->iters[i]->iter_kind != state->stages[stage_id]->iters[i]->iter_kind))
-  //     return ConditionKind::kSkip;
-  // }
-  // if((state->stages[*consumers.begin()]->iters[iter_size-1]->range->min != state->stages[stage_id]->iters[iter_size-1]->range->min).as<tvm::tir::IntImmNode>()->value||
-  //   (state->stages[*consumers.begin()]->iters[iter_size-1]->range->extent != state->stages[stage_id]->iters[iter_size-1]->range->extent).as<tvm::tir::IntImmNode>()->value||
-  //   (state->stages[stage_id]->iters[iter_size-1]->iter_kind != IteratorKind::kSpatial)||
-  //   (state->stages[*consumers.begin()]->iters[iter_size-1]->iter_kind != IteratorKind::kReduction))
-  //   return ConditionKind::kSkip;
-  // return ConditionKind::kApplyAndSkipRest;
 }
 
 std::vector<std::pair<State, int>> RuleFuseReductionGPU::Apply(
@@ -928,7 +934,20 @@ PopulationGenerationRule::ResultKind InitThreadBind::Apply(SketchPolicyNode* pol
         }
         continue;
       }
-      if (stage->op->attrs.count(FuseReductionIterKey::block_level_split)){
+
+      bool block_level_split = false;
+      if (stage->op->attrs.count(FuseReductionIterKey::block_level_split)) {
+        block_level_split = true;
+      }
+      else{
+        const std::set<int>& producers = GetProducers(policy->search_task, *state, stage_id);
+        if(producers.size() == 1 && (*state)->stages[*producers.begin()]->op->attrs.count(FuseReductionIterKey::thread_level_split)){
+          const std::set<int>& inner_producers = GetProducers(policy->search_task, *state,*producers.begin());
+          if(inner_producers.size() == 1 && (*state)->stages[*inner_producers.begin()]->op->attrs.count(FuseReductionIterKey::thread_level_split))
+            block_level_split = true;
+        }
+      }
+      if (block_level_split){
         // Otherwise, this is a tiled root stage, we assume it should be tiled with 2 space level
         // in the outer iterators.
         // The remaining part deals with the thread binding for multi-level tiled stages

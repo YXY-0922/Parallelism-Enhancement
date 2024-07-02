@@ -51,6 +51,7 @@ static RuleSkipStage rule_skip_stage;
 static RuleAlwaysInline rule_always_inline;
 static RuleMultiLevelTiling rule_multi_level_tiling;
 static RuleMultiLevelTilingWithFusion rule_multi_level_tiling_with_fusion;
+static RuleReductionFusion rule_reduction_fusion;
 static RuleAddCacheRead rule_add_cache_read_stage;
 static RuleAddCacheWrite rule_add_cache_write_stage;
 static RuleAddRfactor rule_add_rfactor;
@@ -136,6 +137,7 @@ SketchPolicy::SketchPolicy(SearchTask task, CostModel program_cost_model,
       node->sketch_rules.push_back(&rule_fuse_reduction_gpu);
       node->sketch_rules.push_back(&rule_multi_level_tiling_with_fusion);
       node->sketch_rules.push_back(&rule_multi_level_tiling);
+      // node->sketch_rules.push_back(&rule_reduction_fusion);
       node->sketch_rules.push_back(&rule_skip_stage);
     }
 
@@ -331,7 +333,6 @@ Array<State> SketchPolicyNode::GenerateSketches() {
     pnext->clear();
     for (const State& state : *pnow) {
       int stage_id = cur_stage_id_map[state];
-
       // Reaches to the terminal stage
       if (stage_id < 0) {
         out_states.push_back(state);
